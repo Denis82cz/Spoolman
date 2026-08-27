@@ -22,6 +22,56 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Validate Czech and Slovak locale files
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const root = 'client_v2';
+          const settings = JSON.parse(fs.readFileSync(path.join(root, 'project.inlang/settings.json'), 'utf8'));
+          const languages = fs.readFileSync(path.join(root, 'src/lib/i18n/languages.ts'), 'utf8');
+          const en = JSON.parse(fs.readFileSync(path.join(root, 'locales/en/common.json'), 'utf8'));
+
+          const failures = [];
+          for (const locale of ['cs', 'sk']) {
+            if (!settings.locales.includes(locale)) failures.push(`${locale}: missing from project.inlang/settings.json`);
+            if (!new RegExp(`\\b${locale}:\\s*\\{`).test(languages)) failures.push(`${locale}: missing from languages.ts`);
+
+            const file = path.join(root, `locales/${locale}/common.json`);
+            if (!fs.existsSync(file)) {
+              failures.push(`${locale}: ${file} does not exist`);
+              continue;
+            }
+            const tr = JSON.parse(fs.readFileSync(file, 'utf8'));
+
+            for (const key of Object.keys(en)) {
+              if (!(key in tr)) failures.push(`${locale}: missing key ${key}`);
+            }
+            for (const [key, value] of Object.entries(tr)) {
+              if (typeof value === 'string' && value.trim() === '') failures.push(`${locale}: empty value ${key}`);
+              if (!(key in en) && !key.endsWith('_few')) failures.push(`${locale}: unexpected key ${key}`);
+              if (key.endsWith('_few')) {
+                const base = key.slice(0, -4) + '_other';
+                if (!(base in en)) failures.push(`${locale}: orphan plural key ${key}`);
+              }
+            }
+
+            const vars = (s) => [...String(s).matchAll(/{{\s*([^}]+?)\s*}}/g)].map(m => m[1]).sort().join('|');
+            for (const key of Object.keys(en)) {
+              if (key in tr && vars(en[key]) !== vars(tr[key])) {
+                failures.push(`${locale}: placeholder mismatch in ${key}: EN=[${vars(en[key])}] ${locale.toUpperCase()}=[${vars(tr[key])}]`);
+              }
+            }
+          }
+
+          if (failures.length) {
+            console.error(failures.join('\n'));
+            process.exit(1);
+          }
+          console.log('Locale validation passed for cs and sk.');
+          NODE
+
       - name: Build legacy client
         run: |
           cd client
@@ -30,11 +80,15 @@ jobs:
           echo "VITE_APIURL=/api/v1" > .env.production
           npm run build
 
-      - name: Build client_v2
+      - name: Build and verify client_v2
         run: |
           cd client_v2
           npm ci
+          npm run paraglide
+          npm run check
           npm run build
+          grep -R -q "Slovenčina" build
+          echo "Verified: Slovak language is present in the built client."
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -52,4 +106,6 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
-          tags: ghcr.io/denis82cz/spoolman:czech-test
+          tags: |
+            ghcr.io/denis82cz/spoolman:czech-test
+            ghcr.io/denis82cz/spoolman:localization-${{ github.sha }}
